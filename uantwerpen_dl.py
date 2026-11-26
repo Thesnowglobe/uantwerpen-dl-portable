@@ -672,6 +672,16 @@ def recordings_onedrive(c, cid):
                     "title": it.get("title", "OneDrive Lecture"),
                     "url": lnk
                 })
+            collab_links = [lnk for lnk in links if "bbcollab.com" in lnk.lower()]
+            for lnk in collab_links:
+                entry_id = f"collab_link_{hashlib.sha256(lnk.encode('utf-8')).hexdigest()[:24]}"
+                out.append({
+                    "type": "collab_link",
+                    "entry": entry_id,
+                    "content_id": it["id"],
+                    "title": it.get("title", "Collab Recording"),
+                    "url": lnk,
+                })
             if it.get("hasChildren"):
                 walk(it["id"])
 
@@ -799,6 +809,43 @@ def get_collab_stream_url(c, rec_id, auth_headers):
             }""")
             if dom_srcs:
                 video_url = dom_srcs[0]
+                break
+            time.sleep(0.5)
+    except Exception:
+        pass
+    finally:
+        page.close()
+
+    return video_url
+
+
+def get_collab_link_stream_url(c, playback_url):
+    """Fetches the video stream URL from a direct Blackboard Collaborate playback link."""
+    page = c.new_page()
+    video_url = None
+    net_urls = []
+
+    def on_resp(r):
+        u = r.url or ""
+        if any(ext in u.lower() for ext in (".mp4", ".m3u8", "playback")) and (
+            "cloudfront" in u.lower() or "bbcollab" in u.lower() or ".mp4" in u.lower() or ".m3u8" in u.lower()
+        ):
+            if ".mp4" in u.lower() or ".m3u8" in u.lower():
+                net_urls.append(u)
+
+    page.on("response", on_resp)
+    try:
+        page.goto(playback_url, wait_until="domcontentloaded", timeout=30000)
+        for _ in range(30):
+            dom_srcs = page.evaluate("""() => {
+                const v = Array.from(document.querySelectorAll('video, audio, source')).map(el => el.src || el.currentSrc);
+                return v.filter(s => s && !s.startsWith('blob:'));
+            }""")
+            if dom_srcs:
+                video_url = dom_srcs[0]
+                break
+            if net_urls:
+                video_url = net_urls[0]
                 break
             time.sleep(0.5)
     except Exception:
@@ -7202,6 +7249,12 @@ def cmd_sync(args):
                             success = False
                     elif it["type"] == "collab":
                         video_url = get_collab_stream_url(c, it["entry"], it["auth_headers"])
+                        if video_url:
+                            success = download_media(video_url, dest, video=video_mode, progress=progress)
+                        else:
+                            success = False
+                    elif it["type"] == "collab_link":
+                        video_url = get_collab_link_stream_url(c, it["url"])
                         if video_url:
                             success = download_media(video_url, dest, video=video_mode, progress=progress)
                         else:
