@@ -3460,8 +3460,21 @@ def update_course_checkpoints(course_dir: Path, llm_model="phi4:14b", vision_mod
 
 
 # ---------------------------------------------------------------- AI Slide & PDF Matcher (Option B)
+def _win_long_path(p: Path) -> str:
+    s = str(p)
+    if os.name == "nt" and not s.startswith("\\\\?\\") and len(s) >= 240:
+        abs_s = os.path.abspath(s)
+        if abs_s.startswith("\\\\"):
+            return "\\\\?\\UNC\\" + abs_s.lstrip("\\")
+        return "\\\\?\\" + abs_s
+    return s
+
+
 def link_or_copy(src: Path, dst: Path):
-    dst.parent.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        os.makedirs(_win_long_path(dst.parent), exist_ok=True)
+    else:
+        dst.parent.mkdir(parents=True, exist_ok=True)
     if dst.exists() or dst.is_symlink():
         try:
             dst.unlink()
@@ -3470,7 +3483,7 @@ def link_or_copy(src: Path, dst: Path):
     try:
         os.symlink(str(src.resolve()), str(dst))
     except (OSError, NotImplementedError, AttributeError):
-        shutil.copy2(str(src), str(dst))
+        shutil.copy2(_win_long_path(src), _win_long_path(dst))
 
 
 def _deterministic_pdf_match(
