@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+# uantwerpen-daily-sync: Daily startup sync runner for KU Leuven UAntwerpen Blackboard
+set -e
+set -o pipefail
+
+LOG_DIR="${TOLEDO_DATA_DIR:-$HOME/.local/share/uantwerpen-dl}"
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/daily-sync.log"
+TOLEDO_BIN="$HOME/.local/bin/uantwerpen-dl"
+
+# Ensure GUI/notification environment variables exist when launched by systemd --user
+_UID=$(id -u)
+_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$_UID}"
+export XDG_RUNTIME_DIR="$_RUNTIME_DIR"
+export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$_RUNTIME_DIR/bus}"
+
+if [ -z "${WAYLAND_DISPLAY:-}" ] && [ -d "$_RUNTIME_DIR" ]; then
+    for _ws in "$_RUNTIME_DIR"/wayland-*; do
+        if [ -S "$_ws" ]; then
+            export WAYLAND_DISPLAY="$(basename "$_ws")"
+            break
+        fi
+    done
+fi
+
+if [ -z "${DISPLAY:-}" ]; then
+    for _xs in /tmp/.X11-unix/X*; do
+        if [ -S "$_xs" ]; then
+            export DISPLAY=":$(basename "$_xs" | sed 's/^X//')"
+            break
+        fi
+    done
+    export DISPLAY="${DISPLAY:-:0}"
+fi
+
+if [ -z "${XAUTHORITY:-}" ]; then
+    for _xa in "$_RUNTIME_DIR"/.mutter-Xwaylandauth.* "$HOME/.Xauthority"; do
+        if [ -f "$_xa" ]; then
+            export XAUTHORITY="$_xa"
+            break
+        fi
+    done
+fi
+
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
+}
+
+notify() {
+    local title="$1"
+    local msg="$2"
+    if command -v notify-send >/dev/null 2>&1; then
+        notify-send -a "UAntwerpen Blackboard Daily Sync" "$title" "$msg" 2>/dev/null || true
+    elif [ "$(uname -s)" = "Darwin" ] && command -v osascript >/dev/null 2>&1; then
+        osascript -e 'on run argv' -e 'display notification (item 2 of argv) with title (item 1 of argv)' -e 'end run' "$title" "$msg" 2>/dev/null || true
+    fi
+}
+
+log "=== Starting UAntwerpen Blackboard Daily Sync Pipeline ==="
+
+# 1. Check the UAntwerpen Blackboard session directly. Some networks block ping.
+set +e
+for attempt in 1 2 3; do
+    "$TOLEDO_BIN" check 2>&1 | tee -a "$LOG_FILE"
+    CHECK_STATUS=${PIPESTATUS[0]}
+    if [ "$CHECK_STATUS" -ne 1 ] || [ "$attempt" -eq 3 ]; then
+        break
+    fi
+    sleep 3
+done
+set -e
+
+if [ "$CHECK_STATUS" -eq 2 ]; then
+    log "UAntwerpen Blackboard session expired or not logged in (exit $CHECK_STATUS). Launching login window..."
+    notify "UAntwerpen Blackboard Daily Sync" "KU Leuven login required. Opening login window..."
+    set +e
+    "$TOLEDO_BIN" login 2>&1 | tee -a "$LOG_FILE"
+    LOGIN_STATUS=${PIPESTATUS[0]}
+    set -e
+    if [ $LOGIN_STATUS -ne 0 ]; then
+        log "Login was not completed (status $LOGIN_STATUS). Run 'uantwerpen-login' manually."
+        notify "UAntwerpen Blackboard Daily Sync" "Login required — please run 'uantwerpen-login' to sync."
+        exit $LOGIN_STATUS
+    fi
+elif [ "$CHECK_STATUS" -ne 0 ]; then
+    log "Could not check the UAntwerpen Blackboard session (exit $CHECK_STATUS)."
+    notify "UAntwerpen Blackboard Daily Sync" "Could not connect to UAntwerpen Blackboard. Check the sync log for details."
+    exit "$CHECK_STATUS"
+fi
+
+# 2. Full sync: New PDFs, files, MP4 videos, MP3 audio & announcements
+log "Session active. Running full sync pipeline..."
+notify "UAntwerpen Blackboard Daily Sync" "Syncing new lectures (MP4 + MP3) and course files..."
+
+set +e
+"$TOLEDO_BIN" sync --defer-cpu-transcription "$@" 2>&1 | tee -a "$LOG_FILE"
+SYNC_STATUS=${PIPESTATUS[0]}
+set -e
+
+if [ $SYNC_STATUS -eq 2 ]; then
+    log "UAntwerpen Blackboard sync reported login required (exit 2). Launching login window..."
+    notify "UAntwerpen Blackboard Daily Sync" "KU Leuven login required. Opening login window..."
+    set +e
+    "$TOLEDO_BIN" login 2>&1 | tee -a "$LOG_FILE"
+    LOGIN_STATUS=${PIPESTATUS[0]}
+    set -e
+    if [ $LOGIN_STATUS -eq 0 ]; then
+        log "Login completed. Retrying sync..."
+        set +e
+        "$TOLEDO_BIN" sync --defer-cpu-transcription "$@" 2>&1 | tee -a "$LOG_FILE"
+        SYNC_STATUS=${PIPESTATUS[0]}
+        set -e
+    else
+        log "Login was not completed (status $LOGIN_STATUS). Run 'uantwerpen-login' manually."
+        notify "UAntwerpen Blackboard Daily Sync" "Login required — please run 'uantwerpen-login' to sync."
+        exit $LOGIN_STATUS
+    fi
+fi
+
+if [ $SYNC_STATUS -eq 0 ]; then
+    log "=== UAntwerpen Blackboard Daily Sync pipeline completed successfully ==="
+    notify "UAntwerpen Blackboard Daily Sync" "$("$TOLEDO_BIN" sync-status)"
+elif [ $SYNC_STATUS -eq 2 ]; then
+    log "UAntwerpen Blackboard sync requires login (exit 2). Run 'uantwerpen-login'."
+    notify "UAntwerpen Blackboard Daily Sync" "Login required — please run 'uantwerpen-login' to sync."
+else
+    log "UAntwerpen Blackboard sync exited with status $SYNC_STATUS (see $LOG_FILE for details)."
+    SUMMARY=$("$TOLEDO_BIN" sync-status)
+    if [[ "$SUMMARY" == "Completed with errors"* || "$SUMMARY" == "Failed"* ]]; then
+        notify "UAntwerpen Blackboard Daily Sync" "$SUMMARY"
+    else
+        notify "UAntwerpen Blackboard Daily Sync" "Sync exited with status $SYNC_STATUS. Check the sync log for details."
+    fi
+fi
+
+exit $SYNC_STATUS

@@ -1,0 +1,14 @@
+[Unit]
+Description=KU Leuven UAntwerpen Daily Sync (Course files, lectures, and announcements)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+PassEnvironment=DISPLAY WAYLAND_DISPLAY XAUTHORITY DBUS_SESSION_BUS_ADDRESS
+ExecStart=%h/.local/bin/uantwerpen-daily-sync
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

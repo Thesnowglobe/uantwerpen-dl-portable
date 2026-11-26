@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+# uantwerpen-sync: Control daily automatic sync and run manual syncs
+set -e
+
+TIMER_NAME="uantwerpen-daily-sync.timer"
+PLIST_FILE="$HOME/Library/LaunchAgents/com.toledo.dailysync.plist"
+AUTOSTART_FILE="$HOME/.config/autostart/uantwerpen-sync.desktop"
+LOG_FILE="${TOLEDO_DATA_DIR:-$HOME/.local/share/uantwerpen-dl}/daily-sync.log"
+IS_MAC=false
+if [ "$(uname -s)" = "Darwin" ]; then IS_MAC=true; fi
+
+case "$1" in
+    enable|on|start)
+        set +e
+        "$HOME/.local/bin/uantwerpen-dl" check >/dev/null 2>&1
+        CHECK_STATUS=$?
+        set -e
+        if [ "$CHECK_STATUS" -eq 2 ]; then
+            echo "You are not logged in to UAntwerpen Blackboard yet. Opening login window first..."
+            "$HOME/.local/bin/uantwerpen-login"
+        elif [ "$CHECK_STATUS" -ne 0 ]; then
+            echo "Could not check the UAntwerpen Blackboard session. Check your connection and retry."
+            exit "$CHECK_STATUS"
+        fi
+        if [ "$IS_MAC" = true ]; then
+            PLIST_TEMPLATE="$HOME/.local/share/uantwerpen-dl-app/com.toledo.dailysync.plist"
+            if ! launchctl list com.toledo.dailysync >/dev/null 2>&1; then
+                if [ -f "$PLIST_TEMPLATE" ]; then
+                    mkdir -p "$(dirname "$PLIST_FILE")"
+                    cp "$PLIST_TEMPLATE" "$PLIST_FILE"
+                fi
+                launchctl load -w "$PLIST_FILE"
+            fi
+        else
+            systemctl --user import-environment DISPLAY WAYLAND_DISPLAY XAUTHORITY DBUS_SESSION_BUS_ADDRESS 2>/dev/null || true
+            systemctl --user daemon-reload 2>/dev/null || true
+            systemctl --user enable --now "$TIMER_NAME"
+            if [ -f "$AUTOSTART_FILE" ]; then
+                sed -i 's/^X-GNOME-Autostart-enabled=.*/X-GNOME-Autostart-enabled=true/' "$AUTOSTART_FILE"
+            fi
+        fi
+        echo "✓ Automatic startup sync is now ENABLED."
+        echo "  • When you boot / log in to your PC (and daily at 10:30):"
+        echo "    1. Checks if you are logged in (opens login window if your session expired)."
+        echo "    2. Downloads new course PDFs, files, and datasets."
+        echo "    3. Downloads new lectures as full MP4 videos + extracted MP3 audio."
+        echo "    4. Checks new course announcements."
+        echo "  Run 'uantwerpen-sync status' anytime to inspect."
+        ;;
+    disable|off|stop)
+        if [ "$IS_MAC" = true ]; then
+            launchctl unload -w "$PLIST_FILE" 2>/dev/null || true
+            rm -f "$PLIST_FILE"
+        else
+            systemctl --user disable --now "$TIMER_NAME" 2>/dev/null || true
+            if [ -f "$AUTOSTART_FILE" ]; then
+                sed -i 's/^X-GNOME-Autostart-enabled=.*/X-GNOME-Autostart-enabled=false/' "$AUTOSTART_FILE"
+            fi
+        fi
+        echo "✓ Automatic startup sync is now DISABLED."
+        echo "  No automatic downloads will occur when opening your PC."
+        echo "  You can re-enable anytime with 'uantwerpen-sync enable'."
+        ;;
+    status)
+        echo "=================== UAntwerpen Blackboard Startup Sync Status ==================="
+        if [ "$IS_MAC" = true ]; then
+            LAUNCHD_ACTIVE=false
+            if launchctl list 2>/dev/null | grep -q "com.toledo.dailysync"; then LAUNCHD_ACTIVE=true; fi
+            echo "Status: $([ "$LAUNCHD_ACTIVE" = true ] && echo 'ENABLED (LaunchAgent active)' || echo 'DISABLED (LaunchAgent inactive)')"
+            echo "LaunchAgent:       $PLIST_FILE"
+        else
+            TIMER_ACTIVE=false
+            AUTOSTART_ACTIVE=false
+            if systemctl --user is-enabled "$TIMER_NAME" >/dev/null 2>&1; then TIMER_ACTIVE=true; fi
+            if [ -f "$AUTOSTART_FILE" ] && grep -q "X-GNOME-Autostart-enabled=true" "$AUTOSTART_FILE"; then AUTOSTART_ACTIVE=true; fi
+
+            if [ "$TIMER_ACTIVE" = true ] || [ "$AUTOSTART_ACTIVE" = true ]; then
+                echo "Status: ENABLED (Active on PC startup & login)"
+            else
+                echo "Status: DISABLED (Automatic startup execution is off)"
+            fi
+            echo "------------------------------------------------------------------"
+            echo "Desktop Autostart: $([ "$AUTOSTART_ACTIVE" = true ] && echo 'Active (~/.config/autostart)' || echo 'Inactive')"
+            echo "Systemd Timer:     $([ "$TIMER_ACTIVE" = true ] && echo 'Active' || echo 'Inactive')"
+        fi
+        echo "------------------------------------------------------------------"
+        if [ -f "$LOG_FILE" ]; then
+            echo "Recent sync logs ($LOG_FILE):"
+            tail -n 12 "$LOG_FILE"
+        else
+            echo "No sync runs recorded yet."
+        fi
+        echo "=================================================================="
+        ;;
+    run|now)
+        echo "Running UAntwerpen Blackboard Daily Sync pipeline now..."
+        shift
+        "$HOME/.local/bin/uantwerpen-daily-sync" "$@"
+        ;;
+    follow)
+        "$HOME/.local/bin/uantwerpen-dl" sync-status --watch
+        ;;
+    log|logs)
+        if [ -f "$LOG_FILE" ]; then
+            tail -n 50 "$LOG_FILE"
+        else
+            echo "Log file $LOG_FILE does not exist yet."
+        fi
+        ;;
+    *)
+        echo "UAntwerpen Blackboard Automatic Daily Sync Manager"
+        echo ""
+        echo "Usage: uantwerpen-sync <command>"
+        echo ""
+        echo "Commands:"
+        echo "  enable    Turn ON automatic sync when you open/start your PC"
+        echo "  disable   Turn OFF automatic sync"
+        echo "  status    Check whether auto-sync is currently enabled or disabled"
+        echo "  run       Execute the full sync & transcription pipeline now"
+        echo "  follow    Watch the currently running sync"
+        echo "  log       View latest sync log entries"
+        echo ""
+        ;;
+esac

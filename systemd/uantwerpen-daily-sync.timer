@@ -1,0 +1,10 @@
+[Unit]
+Description=Run UAntwerpen Sync daily and after boot
+
+[Timer]
+OnBootSec=2min
+OnCalendar=*-*-* 10:30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
